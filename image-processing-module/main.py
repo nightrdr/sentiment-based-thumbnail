@@ -6,9 +6,11 @@ import tempfile
 import io
 import httpx
 import asyncio
+import uuid
+import base64
 from concurrent.futures import ThreadPoolExecutor
 from fastapi import FastAPI, File, UploadFile, Form, HTTPException
-from fastapi.responses import StreamingResponse
+from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 
 app = FastAPI()
@@ -20,6 +22,12 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Global job store. Each job_id maps to a dict with job status and data.
+job_results = {}
+
+# Global ThreadPoolExecutor for background processing.
+executor = ThreadPoolExecutor(max_workers=4)
 
 ### --- Utility functions ---
 
@@ -45,7 +53,7 @@ def crop_to_aspect_ratio(crop_img: np.ndarray, target_aspect: float):
 def create_crop_with_face_centered(image: np.ndarray, face_coords: tuple) -> np.ndarray:
     """
     Given an image and face coordinates (x, y, w, h), create a crop where:
-      - The crop height is two times the face height (adjustable).
+      - The crop height is two times the face height.
       - The crop width is calculated to preserve the original image's aspect ratio.
       - The face is centered in the crop.
     The crop boundaries are adjusted to remain within the image.
@@ -124,11 +132,11 @@ def extract_random_frames_from_video(video_path, num_frames=60, segment_minutes=
 
 ### --- DeepFace analysis for a single frame ---
 
-def analyze_frame(frame: np.ndarray, sentiment: str) -> np.ndarray:
+def analyze_frame(frame: np.ndarray, sentiment: str) -> dict:
     """
     Encodes the given frame, calls the DeepFace API to analyze emotions,
-    and if a face with a matching sentiment (by dominant emotion and highest score)
-    is found, returns the cropped frame (using create_crop_with_face_centered).
+    and if a face with a matching sentiment is found, returns a dict with
+    the cropped frame (using create_crop_with_face_centered) and the score.
     Otherwise, returns None.
     """
     # Encode the frame to JPEG.
@@ -178,10 +186,10 @@ def analyze_frame(frame: np.ndarray, sentiment: str) -> np.ndarray:
                         matching_face = (region["x"], region["y"], region["w"], region["h"])
     
     if matching_face:
-        res = dict()
-        res["score"] = highest_score
-        res["image"] = create_crop_with_face_centered(frame, matching_face)
-        return res
+        return {
+            "score": highest_score,
+            "image": create_crop_with_face_centered(frame, matching_face)
+        }
     return None
 
 ### --- Process video frames in parallel --- 
@@ -198,6 +206,7 @@ def process_video_file(video_path: str, sentiment: str) -> np.ndarray:
 
     result_img = None
     highest_score = -99999
+    from concurrent.futures import ThreadPoolExecutor
     with ThreadPoolExecutor(max_workers=8) as executor:
         # Submit analysis tasks for each frame.
         futures = {executor.submit(analyze_frame, frame, sentiment): idx for idx, frame in frames}
@@ -205,31 +214,66 @@ def process_video_file(video_path: str, sentiment: str) -> np.ndarray:
             try:
                 res = future.result()
                 if res is not None and res["score"] > highest_score:
-                    # Return first frame with a valid matching face.
                     result_img = res["image"]
                     highest_score = res["score"]
                     break
             except Exception as e:
                 print(f"Error processing frame: {e}")
     if result_img is None:
-        # Cycle through all emotions, and store first available face
+        # Fallback: cycle through other sentiments and take the first available face.
         for _sent in ["happy", "surprise", "neutral", "sad", "angry", "disgust", "fear"]:
             with ThreadPoolExecutor(max_workers=8) as executor:
-              # Submit analysis tasks for each frame.
-              futures = {executor.submit(analyze_frame, frame, _sent): idx for idx, frame in frames}
-              for future in futures:
-                  try:
-                      res = future.result()
-                      print("Edge case res: ", res)
-                      if res is not None and res["image"] is not None:
-                          # fallback to any face
-                          result_img = res["image"]
-                          break
-                  except Exception as e:
-                      print(f"Error processing frame: {e}")
+                futures = {executor.submit(analyze_frame, frame, _sent): idx for idx, frame in frames}
+                for future in futures:
+                    try:
+                        res = future.result()
+                        print("Edge case res: ", res)
+                        if res is not None and res["image"] is not None:
+                            result_img = res["image"]
+                            break
+                    except Exception as e:
+                        print(f"Error processing frame: {e}")
             if result_img is not None:
                 break
     return result_img
+
+### --- Background Job Function ---
+
+def process_job(job_id: str, video_path: str, sentiment: str):
+    """
+    Background job function that processes the video file.
+    Updates the global job_results with the status and result.
+    """
+    try:
+        result_img = process_video_file(video_path, sentiment)
+        os.remove(video_path)
+        if result_img is None:
+            job_results[job_id] = {
+                "status": "failed",
+                "error": "No frame with matching sentiment found."
+            }
+        else:
+            ret, buf = cv2.imencode(".png", result_img)
+            if not ret:
+                job_results[job_id] = {
+                    "status": "failed",
+                    "error": "Failed to encode image."
+                }
+            else:
+                image_b64 = base64.b64encode(buf.tobytes()).decode('utf-8')
+                job_results[job_id] = {
+                    "status": "completed",
+                    "image": image_b64
+                }
+    except Exception as e:
+        try:
+            os.remove(video_path)
+        except Exception:
+            pass
+        job_results[job_id] = {
+            "status": "failed",
+            "error": str(e)
+        }
 
 ### --- Endpoint: Process Video Input ---
 
@@ -240,9 +284,8 @@ async def process_video_endpoint(
 ):
     """
     Endpoint that accepts a video file and a sentiment string.
-    It extracts random frames from the first 10 minutes of the video,
-    analyzes up to 10 frames in parallel using the DeepFace API,
-    and returns the processed (cropped) frame as a PNG image.
+    The file upload and processing are done in a background thread.
+    Returns a JSON response with a job ID.
     """
     # Determine the file extension based on the uploaded file's name.
     filename_lower = video.filename.lower()
@@ -262,18 +305,38 @@ async def process_video_endpoint(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Error saving video: {e}")
     
+    # Create a unique job id and mark it as in progress.
+    job_id = str(uuid.uuid4())
+    job_results[job_id] = {"status": "inprogress"}
+    
+    # Schedule the processing in a background thread.
     loop = asyncio.get_running_loop()
-    result_img = await loop.run_in_executor(None, process_video_file, video_path, sentiment)
-    os.remove(video_path)
+    loop.run_in_executor(executor, process_job, job_id, video_path, sentiment)
     
-    if result_img is None:
-        raise HTTPException(status_code=404, detail="No frame with matching sentiment found.")
+    # Return the job id.
+    return {"job_id": job_id}
+
+### --- Endpoint: Check Job Status ---
+
+@app.get("/job_status/{job_id}")
+async def get_job_status(job_id: str):
+    """
+    Returns the status of the video processing job.
+    If processing is in progress, returns { "status": "inprogress" }.
+    If it has failed, returns { "status": "failed", "error": "error message" }.
+    If completed, returns { "status": "completed", "image": "base64 encoded image" }.
+    Once a completed or failed job is queried, its data is deleted from memory.
+    """
+    job = job_results.get(job_id)
+    if not job:
+        # If job_id is not found, assume it is still in progress.
+        return {"status": "inprogress"}
     
-    ret, buf = cv2.imencode(".png", result_img)
-    if not ret:
-        raise HTTPException(status_code=500, detail="Failed to encode image.")
+    if job.get("status") in ["completed", "failed"]:
+        # Remove job from memory after returning the result.
+        job_results.pop(job_id, None)
     
-    return StreamingResponse(io.BytesIO(buf.tobytes()), media_type="image/png")
+    return job
 
 if __name__ == "__main__":
     import uvicorn
