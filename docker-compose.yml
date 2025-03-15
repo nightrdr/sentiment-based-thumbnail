@@ -1,0 +1,45 @@
+version: '3.8'
+
+services:
+  deepface:
+    restart: unless-stopped
+    build:
+      context: ./deepface
+      dockerfile: Dockerfile
+    ports:
+      - "5000:5000"
+    networks:
+      - sharednet
+
+  nextjs:
+    restart: unless-stopped
+    build:
+      context: ./nextjs-app
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    networks:
+      - sharednet
+
+  fastapi:
+    restart: unless-stopped
+    build:
+      context: ./image-processing-module
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    networks:
+      - sharednet
+  nginx:
+    restart: unless-stopped
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    ports:
+      - "80:80"
+    networks:
+      - sharednet
+
+networks:
+  sharednet:
+    driver: bridge
