@@ -151,7 +151,7 @@ def analyze_frame(frame: np.ndarray, sentiment: str) -> dict:
     data = {"actions": "emotion"}
     
     try:
-        r = httpx.post(analyze_url, files=files, data=data, timeout=20.0)
+        r = httpx.post(analyze_url, files=files, data=data, timeout=60.0)
         r.raise_for_status()
     except Exception as e:
         print(f"DeepFace analyze error on frame: {e}")
