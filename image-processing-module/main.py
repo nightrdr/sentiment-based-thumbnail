@@ -222,7 +222,7 @@ def process_video_file(video_path: str, sentiment: str) -> np.ndarray:
     if result_img is None:
         # Fallback: cycle through other sentiments and take the first available face.
         for _sent in ["happy", "surprise", "neutral", "sad", "angry", "disgust", "fear"]:
-            with ThreadPoolExecutor(max_workers=8) as executor:
+            with ThreadPoolExecutor(max_workers=2) as executor:
                 futures = {executor.submit(analyze_frame, frame, _sent): idx for idx, frame in frames}
                 for future in futures:
                     try:
