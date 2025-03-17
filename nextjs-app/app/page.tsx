@@ -12,6 +12,7 @@ import { Alert, AlertDescription } from "@/components/ui/alert"
 import { Progress } from "@/components/ui/progress"
 import { FFmpeg } from "@ffmpeg/ffmpeg"
 import { fetchFile, toBlobURL } from "@ffmpeg/util"
+import { set } from "date-fns"
 
 export default function VideoUploadForm() {
   const [file, setFile] = useState<File | null>(null)
@@ -233,12 +234,10 @@ export default function VideoUploadForm() {
 
     try {
       // Process the video if not already processed
-      if (!processedFile) {
-        const processed = await processVideo(file)
-        if (!processed) {
-          return // Error occurred during processing
-        }
-        setProcessedFile(processed)
+      const processed = await processVideo(file)
+      setProcessedFile(processed)
+      if(!processed) {
+        throw new Error("Failed to process video")
       }
 
       // Now upload the processed file
@@ -247,10 +246,10 @@ export default function VideoUploadForm() {
       setResponseImage(null)
 
       const formData = new FormData()
-      formData.append("video", processedFile || file)
+      formData.append("video", processed)
       formData.append("sentiment", sentiment)
 
-      const response = await fetch("http://localhost:8000/process_video", {
+      const response = await fetch("/image-api/process_video", {
         method: "POST",
         body: formData,
       })
@@ -297,7 +296,7 @@ export default function VideoUploadForm() {
       setError("Something went wrong")
       console.error(err)
     } finally {
-      setIsLoading(false)
+      // setIsLoading(false)
     }
   }
 
