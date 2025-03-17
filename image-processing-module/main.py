@@ -216,7 +216,9 @@ def process_video_file(video_path: str, sentiment: str) -> np.ndarray:
                 if res is not None and res["score"] > highest_score:
                     result_img = res["image"]
                     highest_score = res["score"]
-                    break
+                    for pending in futures:
+                        pending.cancel()
+                    return result_img
             except Exception as e:
                 print(f"Error processing frame: {e}")
     if result_img is None:
@@ -230,7 +232,9 @@ def process_video_file(video_path: str, sentiment: str) -> np.ndarray:
                         print("Edge case res: ", res)
                         if res is not None and res["image"] is not None:
                             result_img = res["image"]
-                            break
+                            for pending in futures:
+                                pending.cancel()
+                            return result_img
                     except Exception as e:
                         print(f"Error processing frame: {e}")
             if result_img is not None:
