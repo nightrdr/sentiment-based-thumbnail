@@ -34,7 +34,7 @@ export default function VideoUploadForm() {
         const ffmpeg = ffmpegRef.current
 
         // Load FFmpeg core
-        const baseURL = "https://unpkg.com/@ffmpeg/core@0.11.0/dist/umd"
+        const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/umd"
         await ffmpeg.load({
           coreURL: await toBlobURL(`${baseURL}/ffmpeg-core.js`, "text/javascript"),
           wasmURL: await toBlobURL(`${baseURL}/ffmpeg-core.wasm`, "application/wasm"),
@@ -259,16 +259,40 @@ export default function VideoUploadForm() {
         throw new Error("Request failed")
       }
 
-      const contentType = response.headers.get("content-type")
+      // Retrieve the job id from the API response.
+      const { job_id: jobId } = await response.json();
 
-      if (contentType && contentType.includes("image")) {
-        const blob = await response.blob()
-        const imageUrl = URL.createObjectURL(blob)
-        setResponseImage(imageUrl)
-      } else {
-        // If it's not an image, assume it's an error
-        throw new Error("Invalid response format")
-      }
+      // Poll the job status every 10 seconds.
+      const pollJobStatus = async () => {
+        try {
+          const statusRes = await fetch(`/image-api/job_status/${jobId}`);
+          if (!statusRes.ok) {
+            throw new Error("Job status request failed");
+          }
+          const jobData = await statusRes.json();
+          if (jobData.status === "inprogress") {
+            // If still in progress, poll again in 10 seconds.
+            setTimeout(pollJobStatus, 10000);
+          } else if (jobData.status === "failed") {
+            setError(jobData.error || "Job failed");
+            setIsLoading(false);
+          } else if (jobData.status === "completed") {
+            // When completed, create an image URL from the base64 string.
+            const imageUrl = `data:image/png;base64,${jobData.image}`;
+            setResponseImage(imageUrl);
+            setIsLoading(false);
+          } else {
+            // In case of unexpected status, poll again.
+            setTimeout(pollJobStatus, 10000);
+          }
+        } catch (pollError) {
+          setError("Something went wrong while checking job status");
+          setIsLoading(false);
+          console.error(pollError);
+        }
+      };
+
+      pollJobStatus();
     } catch (err) {
       setError("Something went wrong")
       console.error(err)
