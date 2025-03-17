@@ -207,7 +207,7 @@ def process_video_file(video_path: str, sentiment: str) -> np.ndarray:
     result_img = None
     highest_score = -99999
     from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=8) as executor:
+    with ThreadPoolExecutor(max_workers=2) as executor:
         # Submit analysis tasks for each frame.
         futures = {executor.submit(analyze_frame, frame, sentiment): idx for idx, frame in frames}
         for future in futures:

@@ -239,6 +239,7 @@ export default function VideoUploadForm() {
       if(!processed) {
         throw new Error("Failed to process video")
       }
+      console.log("Size after processing: ", processed.size)
 
       // Now upload the processed file
       setIsLoading(true)
